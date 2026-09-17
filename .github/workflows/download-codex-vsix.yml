@@ -1,0 +1,117 @@
+name: Build latest Codex VSIX
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/download-codex-vsix.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Find and download latest stable Windows x64 VSIX
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          response_file="$(mktemp)"
+          curl --fail --silent --show-error --location \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "Accept: application/json;api-version=7.2-preview.1" \
+            "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1" \
+            --data '{"filters":[{"criteria":[{"filterType":7,"value":"openai.chatgpt"}]}],"flags":17}' \
+            --output "$response_file"
+
+          version="$(
+            jq -r '
+              [
+                .results[0].extensions[0].versions[]
+                | select(.targetPlatform == "win32-x64")
+                | select(
+                    (
+                      [.properties[]? | select(.key == "Microsoft.VisualStudio.Code.PreRelease") | .value][0]
+                      // "false"
+                      | tostring
+                      | ascii_downcase
+                    ) != "true"
+                  )
+              ]
+              | first
+              | .version // empty
+            ' "$response_file"
+          )"
+
+          if [[ -z "$version" ]]; then
+            echo "Could not resolve the latest stable openai.chatgpt win32-x64 version." >&2
+            exit 1
+          fi
+
+          file="openai.chatgpt-${version}-win32-x64.vsix"
+          package_url="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/openai/vsextensions/chatgpt/${version}/vspackage?targetPlatform=win32-x64"
+
+          curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors \
+            "$package_url" \
+            --output "$file"
+
+          unzip -tq "$file"
+
+          package_id="$(unzip -p "$file" extension/package.json | jq -r '.publisher + "." + .name')"
+          package_version="$(unzip -p "$file" extension/package.json | jq -r '.version')"
+
+          [[ "$package_id" == "openai.chatgpt" ]]
+          [[ "$package_version" == "$version" ]]
+
+          sha256sum "$file" | tee "${file}.sha256"
+
+          {
+            echo "VERSION=$version"
+            echo "FILE=$file"
+            echo "PACKAGE_URL=$package_url"
+          } >> "$GITHUB_ENV"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-vsix-${{ env.VERSION }}-win32-x64
+          path: |
+            ${{ env.FILE }}
+            ${{ env.FILE }}.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          tag="codex-vscode-${VERSION}"
+          notes_file="$(mktemp)"
+
+          {
+            echo "Official OpenAI Codex VS Code extension for Windows x64."
+            echo
+            echo "- Extension: openai.chatgpt"
+            echo "- Version: ${VERSION}"
+            echo "- Platform: win32-x64"
+            echo "- Source: ${PACKAGE_URL}"
+            echo "- SHA-256 checksum is attached."
+          } > "$notes_file"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$FILE" "${FILE}.sha256" --clobber
+          else
+            gh release create "$tag" \
+              "$FILE" "${FILE}.sha256" \
+              --title "Codex VSIX ${VERSION} (Windows x64)" \
+              --notes-file "$notes_file"
+          fi
