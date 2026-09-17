@@ -124,11 +124,12 @@ jobs:
             echo "- SHA-256 checksum is attached."
           } > "$notes_file"
 
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$FILE" "${FILE}.sha256" --clobber
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" "$FILE" "${FILE}.sha256" --clobber --repo "$GITHUB_REPOSITORY"
           else
             gh release create "$tag" \
               "$FILE" "${FILE}.sha256" \
               --title "Codex VSIX ${VERSION} (Windows x64)" \
-              --notes-file "$notes_file"
+              --notes-file "$notes_file" \
+              --repo "$GITHUB_REPOSITORY"
           fi
