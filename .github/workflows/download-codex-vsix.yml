@@ -27,11 +27,11 @@ jobs:
             --header "Content-Type: application/json" \
             --header "Accept: application/json;api-version=7.2-preview.1" \
             "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1" \
-            --data '{"filters":[{"criteria":[{"filterType":7,"value":"openai.chatgpt"}]}],"flags":17}' \
+            --data '{"filters":[{"criteria":[{"filterType":7,"value":"openai.chatgpt"}]}],"flags":147}' \
             --output "$response_file"
 
-          version="$(
-            jq -r '
+          selected="$(
+            jq -c '
               [
                 .results[0].extensions[0].versions[]
                 | select(.targetPlatform == "win32-x64")
@@ -45,21 +45,33 @@ jobs:
                   )
               ]
               | first
-              | .version // empty
             ' "$response_file"
           )"
 
-          if [[ -z "$version" ]]; then
-            echo "Could not resolve the latest stable openai.chatgpt win32-x64 version." >&2
+          version="$(jq -r '.version // empty' <<< "$selected")"
+          download_url="$(
+            jq -r '
+              [.files[]? | select(.assetType == "Microsoft.VisualStudio.Services.VSIXPackage") | .source][0]
+              // empty
+            ' <<< "$selected"
+          )"
+          expected_sha="$(
+            jq -r '
+              [.properties[]? | select(.key == "Microsoft.VisualStudio.Services.VsixSha256") | .value][0]
+              // empty
+            ' <<< "$selected"
+          )"
+
+          if [[ -z "$version" || -z "$download_url" ]]; then
+            echo "Could not resolve the latest stable openai.chatgpt win32-x64 package." >&2
             exit 1
           fi
 
           file="openai.chatgpt-${version}-win32-x64.vsix"
-          package_url="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/openai/vsextensions/chatgpt/${version}/vspackage?targetPlatform=win32-x64"
 
           curl --fail --silent --show-error --location \
             --retry 3 --retry-all-errors \
-            "$package_url" \
+            "$download_url" \
             --output "$file"
 
           unzip -tq "$file"
@@ -70,12 +82,17 @@ jobs:
           [[ "$package_id" == "openai.chatgpt" ]]
           [[ "$package_version" == "$version" ]]
 
-          sha256sum "$file" | tee "${file}.sha256"
+          actual_sha="$(sha256sum "$file" | awk '{print $1}')"
+          if [[ -n "$expected_sha" && "$actual_sha" != "$expected_sha" ]]; then
+            echo "SHA-256 mismatch: expected $expected_sha, got $actual_sha" >&2
+            exit 1
+          fi
+          printf '%s  %s\n' "$actual_sha" "$file" > "${file}.sha256"
 
           {
             echo "VERSION=$version"
             echo "FILE=$file"
-            echo "PACKAGE_URL=$package_url"
+            echo "PACKAGE_URL=$download_url"
           } >> "$GITHUB_ENV"
 
       - name: Upload workflow artifact
